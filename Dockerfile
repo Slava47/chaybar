@@ -7,6 +7,8 @@ WORKDIR /app
 # Копируем исходный код приложения
 COPY bot.py .
 
+COPY tea_photos/ ./tea_photos/
+
 # Создаем необходимые директории
 RUN mkdir -p tea_photos
 
