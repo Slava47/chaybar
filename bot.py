@@ -25,7 +25,7 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 # Путь к папке с фотографиями чая
-TEA_PHOTOS_DIR = "app/tea_photos/"
+TEA_PHOTOS_DIR = "app/tea_photos"
 
 # Проверяем существование папки с фотографиями
 if not os.path.exists(TEA_PHOTOS_DIR):
