@@ -1,19 +1,18 @@
-# Используем официальный образ Python
 FROM python:3.11-slim
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем исходный код приложения
-COPY bot.py .
-
-COPY tea_photos/ ./tea_photos/
-
-# Устанавливаем Python зависимости напрямую
-RUN pip install --no-cache-dir pyTelegramBotAPI==4.16.1
-
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+# Создаём пользователя заранее (без root-доступа)
+RUN useradd -m -u 1000 botuser
 USER botuser
 
-# Команда запуска бота
+# Копируем файлы от пользователя (без смены владельца)
+COPY --chown=botuser:botuser bot.py .
+COPY --chown=botuser:botuser tea_photos/ ./tea_photos/
+
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir pyTelegramBotAPI==4.16.1
+
+# Запуск
 CMD ["python", "bot.py"]
