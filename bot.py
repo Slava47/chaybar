@@ -448,12 +448,6 @@ def handle_callback_query(call):
             f"*{tea_name}*\n"
             f"Цена: {tea_data['price']}₽\n\n"
             f"{tea_data['description']}\n\n"
-            f"*Характеристики:*\n"
-            f"• Тип: {get_tea_type_name(tea_data['characteristics']['type'])}\n"
-            f"• Крепость: {get_strength_name(tea_data['characteristics']['strength'])}\n"
-            f"• Кофеин: {get_caffeine_name(tea_data['characteristics']['caffeine'])}\n"
-            f"• Вкус: {get_taste_name(tea_data['characteristics']['taste'])}\n"
-            f"• Аромат: {get_aroma_name(tea_data['characteristics']['aroma'])}\n\n"
             f"Используйте кнопки для навигации по меню"
         )
         
