@@ -424,88 +424,113 @@ def get_aroma_name(aroma):
     return aromas.get(aroma, aroma)
 
 # Обработка инлайн-кнопок
+# Обработка инлайн-кнопок с защитой от спама
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback_query(call):
     user_id = call.message.chat.id
     
-    if call.data.startswith("menu_page_"):
-        # Листание страниц меню
-        page = int(call.data.split("_")[2])
-        user_menu_pages[user_id] = page
+    # 🔒 Защита от быстрых нажатий: если уже обрабатывается — игнорируем
+    if user_states.get(user_id) == "processing":
+        bot.answer_callback_query(call.id, text="⏳ Загружаю...", show_alert=False)
+        return
+    
+    # Устанавливаем флаг обработки
+    user_states[user_id] = "processing"
+    
+    try:
+        if call.data.startswith("menu_page_"):
+            page = int(call.data.split("_")[2])
+            tea_list = list(TEA_MENU.items())
+            total_pages = len(tea_list)
+            
+            if page < 0 or page >= total_pages:
+                bot.answer_callback_query(call.id)
+                user_states[user_id] = "browsing_menu"
+                return
+            
+            user_menu_pages[user_id] = page
+            tea_name, tea_data = tea_list[page]
+            
+            caption = (
+                f"📖 *Чайная карта* (страница {page+1}/{total_pages})\n\n"
+                f"*{tea_name}*\n"
+                f"Цена: {tea_data['price']}₽\n\n"
+                f"{tea_data['description']}\n\n"
+                f"Используйте кнопки для навигации по меню"
+            )
+            
+            send_tea_photo(
+                user_id,
+                tea_name,
+                tea_data,
+                caption,
+                get_menu_keyboard(page),
+                call.message.message_id
+            )
+            user_states[user_id] = "browsing_menu"  # Возвращаем в режим просмотра
         
-        tea_list = list(TEA_MENU.items())
-        total_pages = len(tea_list)
+        elif call.data == "to_main_menu":
+            try:
+                bot.delete_message(user_id, call.message.message_id)
+            except:
+                pass
+            bot.send_message(
+                user_id,
+                "🍃 *Главное меню*\n\nВыберите действие:",
+                reply_markup=main_menu(),
+                parse_mode="Markdown"
+            )
+            user_states[user_id] = "main"
         
-        if page < 0 or page >= total_pages:
-            return
+        elif call.data == "start_test_from_menu":
+            try:
+                bot.delete_message(user_id, call.message.message_id)
+            except:
+                pass
+            user_responses[user_id] = {}
+            user_states[user_id] = "test"
+            ask_question(call.message, 0)
         
-        # Получаем текущий чай
-        tea_name, tea_data = tea_list[page]
+        elif call.data == "start_test_from_result":
+            try:
+                bot.delete_message(user_id, call.message.message_id)
+            except:
+                pass
+            user_responses[user_id] = {}
+            user_states[user_id] = "test"
+            ask_question(call.message, 0)
         
-        # Формируем описание
-        caption = (
-            f"📖 *Чайная карта* (страница {page+1}/{total_pages})\n\n"
-            f"*{tea_name}*\n"
-            f"Цена: {tea_data['price']}₽\n\n"
-            f"{tea_data['description']}\n\n"
-            f"Используйте кнопки для навигации по меню"
-        )
+        elif call.data == "show_menu_from_result":
+            try:
+                bot.delete_message(user_id, call.message.message_id)
+            except:
+                pass
+            show_menu_page(call.message, page=0)
+            user_states[user_id] = "browsing_menu"
         
-        # Обновляем фото и кнопки
-        send_tea_photo(
-            user_id,
-            tea_name,
-            tea_data,
-            caption,
-            get_menu_keyboard(page),
-            call.message.message_id
-        )
+        elif call.data == "current_page":
+            # Просто подтверждаем нажатие на номер страницы
+            bot.answer_callback_query(call.id)
+            user_states[user_id] = "browsing_menu"
         
-    elif call.data == "to_main_menu":
-        # Возврат в главное меню из меню чаев
+        else:
+            bot.answer_callback_query(call.id, text="Неизвестная команда")
+            user_states[user_id] = user_states.get(user_id, "main")
+    
+    except Exception as e:
+        logger.error(f"Ошибка в колбэке: {e}")
         try:
-            bot.delete_message(user_id, call.message.message_id)
+            bot.answer_callback_query(call.id, text="Произошла ошибка", show_alert=True)
         except:
             pass
-        
-        # Показываем главное меню
-        bot.send_message(
-            user_id,
-            "🍃 *Главное меню*\n\nВыберите действие:",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
-        )
-        
-    elif call.data == "start_test_from_menu":
-        # Начать тест из меню чаев
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        user_responses[user_id] = {}
-        user_states[user_id] = "test"
-        ask_question(call.message, 0)
-        
-    elif call.data == "start_test_from_result":
-        # Начать тест из результатов
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        user_responses[user_id] = {}
-        user_states[user_id] = "test"
-        ask_question(call.message, 0)
-        
-    elif call.data == "show_menu_from_result":
-        # Показать меню из результатов
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        show_menu_page(call.message, page=0)
+        # Восстанавливаем состояние
+        user_states[user_id] = user_states.get(user_id, "main")
+    
+    # Гарантируем подтверждение колбэка
+    try:
+        bot.answer_callback_query(call.id)
+    except:
+        pass
 
 # Начать тест с первого вопроса
 def ask_question(message, question_index):
