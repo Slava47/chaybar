@@ -333,12 +333,6 @@ def show_menu_page(message, page=0):
         f"*{tea_name}*\n"
         f"Цена: {tea_data['price']}₽\n\n"
         f"{tea_data['description']}\n\n"
-        f"*Характеристики:*\n"
-        f"• Тип: {get_tea_type_name(tea_data['characteristics']['type'])}\n"
-        f"• Крепость: {get_strength_name(tea_data['characteristics']['strength'])}\n"
-        f"• Кофеин: {get_caffeine_name(tea_data['characteristics']['caffeine'])}\n"
-        f"• Вкус: {get_taste_name(tea_data['characteristics']['taste'])}\n"
-        f"• Аромат: {get_aroma_name(tea_data['characteristics']['aroma'])}\n\n"
         f"Используйте кнопки для навигации по меню"
     )
     
@@ -354,7 +348,7 @@ def show_menu_page(message, page=0):
 # Показать информацию о типах чая
 def show_tea_info(message):
     info_text = (
-        "*ℹ️ Информация о типах чая:*\n\n"
+        "*Информация о типах чая:*\n\n"
         "*Зеленый чай* - минимальная обработка, сохраняет натуральный цвет и свежесть\n"
         "*Черный чай* - полная ферментация, насыщенный цвет и крепкий вкус\n"
         "*Улун* - частичная ферментация, сочетает свежесть зеленого и насыщенность черного\n"
@@ -660,12 +654,6 @@ def show_result(message):
         f"*{tea_name}* - {tea_data['price']}₽\n"
         f"Совпадение: {score}/15 баллов\n\n"
         f"{tea_data['description']}\n\n"
-        f"*Характеристики:*\n"
-        f"• Тип: {get_tea_type_name(tea_data['characteristics']['type'])}\n"
-        f"• Крепость: {get_strength_name(tea_data['characteristics']['strength'])}\n"
-        f"• Кофеин: {get_caffeine_name(tea_data['characteristics']['caffeine'])}\n"
-        f"• Вкус: {get_taste_name(tea_data['characteristics']['taste'])}\n"
-        f"• Аромат: {get_aroma_name(tea_data['characteristics']['aroma'])}\n\n"
         f"Что вы хотите сделать дальше?"
     )
     
