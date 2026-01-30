@@ -9,9 +9,6 @@ COPY bot.py .
 
 COPY tea_photos/ ./tea_photos/
 
-# Создаем необходимые директории
-RUN mkdir -p tea_photos
-
 # Устанавливаем Python зависимости напрямую
 RUN pip install --no-cache-dir pyTelegramBotAPI==4.16.1
 
