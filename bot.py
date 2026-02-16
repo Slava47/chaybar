@@ -1,781 +1,568 @@
-import telebot
-from telebot import types
-import os
-import logging
-from datetime import datetime
+"""
+Телеграм-бот для бара «Ли Бо».
+Запуск: python bot.py
+"""
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+import asyncio
+import logging
+import os
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from database import init_db, add_user, add_quiz_session, add_cocktail_rating, get_user_stats
+from cocktails import (
+    get_cocktails_by_category,
+    get_category_name,
+    match_cocktails,
+    COLD_COCKTAILS,
+    HOT_COCKTAILS,
+    ALCOHOLIC_COCKTAILS,
+)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise ValueError("Переменная окружения BOT_TOKEN не задана. Получите токен у @BotFather.")
+
+PICTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pictures")
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Получаем токен из переменной окружения TELEGRAM_BOT_TOKEN
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+router = Router()
 
-if not TOKEN:
-    logger.error("Токен не найден! Установите переменную окружения TELEGRAM_BOT_TOKEN")
-    logger.info("Пример: export TELEGRAM_BOT_TOKEN='ваш_токен' или создайте файл .env")
-    exit(1)
 
-bot = telebot.TeleBot(TOKEN)
+# ─── FSM States ───────────────────────────────────────────────────────────────
 
-# Путь к папке с фотографиями чая
-TEA_PHOTOS_DIR = "tea_photos"
+class QuizStates(StatesGroup):
+    q_alcoholic = State()
+    q_temperature = State()
+    q_taste = State()
+    q_tea = State()
+    q_strength = State()
+    browsing_results = State()
+    waiting_review = State()
 
-# Проверяем существование папки с фотографиями
-if not os.path.exists(TEA_PHOTOS_DIR):
-    logger.warning(f"Папка {TEA_PHOTOS_DIR} не найдена. Создайте её и добавьте фотографии чаев.")
-    os.makedirs(TEA_PHOTOS_DIR, exist_ok=True)
 
-# Меню чаев с путями к фотографиям
-TEA_MENU = {
-    "Зеленый чай Сенча": {
-        "description": "Японский зеленый чай с нежным травяным вкусом и свежим ароматом. Идеален для утреннего пробуждения.",
-        "price": 180,
-        "characteristics": {"type": "green", "strength": "light", "caffeine": "medium", "taste": "fresh", "aroma": "grassy"},
-        "photo_file": "Сенча.png"
-    },
-    "Улун Те Гуань Инь": {
-        "description": "Китайский улун с цветочным ароматом и медовым послевкусием. Ценится за сложный букет.",
-        "price": 220,
-        "characteristics": {"type": "oolong", "strength": "medium", "caffeine": "medium", "taste": "floral", "aroma": "orchid"},
-        "photo_file": "улун_те_гуань_инь.jpg"
-    },
-    "Черный чай Дарджилинг": {
-        "description": "Индийский черный чай с мускатными нотками, 'чайное шампанское'. Элегантный и бодрящий.",
-        "price": 200,
-        "characteristics": {"type": "black", "strength": "strong", "caffeine": "high", "taste": "muscatel", "aroma": "fruity"},
-        "photo_file": "индия.jpg"
-    },
-    "Белый чай Бай Хао Инь Чжэнь": {
-        "description": "Нежный белый чай из нераспустившихся почек с тонким цветочным вкусом. Утонченный выбор.",
-        "price": 250,
-        "characteristics": {"type": "white", "strength": "very_light", "caffeine": "low", "taste": "delicate", "aroma": "honey"},
-        "photo_file": "белый.jpg"
-    },
-    "Пуэр Шу": {
-        "description": "Ферментированный чай с землистым вкусом и глубоким послевкусием. С возрастом становится лучше.",
-        "price": 240,
-        "characteristics": {"type": "pu-erh", "strength": "very_strong", "caffeine": "medium", "taste": "earthy", "aroma": "woody"},
-        "photo_file": "шу_пуэр.jpg"
-    },
-    "Ройбуш": {
-        "description": "Южноафриканский травяной настой без кофеина со сладковатым вкусом. Успокаивающий напиток.",
-        "price": 160,
-        "characteristics": {"type": "herbal", "strength": "light", "caffeine": "none", "taste": "sweet", "aroma": "nutty"},
-        "photo_file": "Ройбуш.jpg"
-    },
-    "Чай с жасмином": {
-        "description": "Зеленый чай, ароматизированный цветами жасмина. Благоухающий и освежающий.",
-        "price": 190,
-        "characteristics": {"type": "scented", "strength": "light", "caffeine": "medium", "taste": "floral", "aroma": "jasmine"},
-        "photo_file": "жасмин.jpg"
-    },
-    "Иван-чай": {
-        "description": "Традиционный русский травяной напиток с мягким вкусом. Натуральный и полезный.",
-        "price": 170,
-        "characteristics": {"type": "herbal", "strength": "medium", "caffeine": "none", "taste": "herbal", "aroma": "meadow"},
-        "photo_file": "иван_чай.jpg"
-    }
-}
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
-# Вопросы теста для чайного сомелье
-QUESTIONS = [
-    {
-        "text": "Какой тип чая предпочитаете?",
-        "options": {
-            "Зеленый": "green",
-            "Черный": "black", 
-            "Улун": "oolong",
-            "Белый": "white",
-            "Травяной": "herbal"
-        }
-    },
-    {
-        "text": "Какую крепость напитка предпочитаете?",
-        "options": {
-            "Очень легкую": "very_light",
-            "Легкую": "light",
-            "Среднюю": "medium",
-            "Крепкую": "strong",
-            "Очень крепкую": "very_strong"
-        }
-    },
-    {
-        "text": "Ваше отношение к кофеину?",
-        "options": {
-            "Хочу бодрящий эффект": "high",
-            "Умеренное содержание": "medium",
-            "Минимум кофеина": "low",
-            "Без кофеина": "none"
-        }
-    },
-    {
-        "text": "Какие вкусовые предпочтения?",
-        "options": {
-            "Цветочные нотки": "floral",
-            "Фруктовые оттенки": "fruity",
-            "Травяные тона": "herbal",
-            "Древесные/землистые": "earthy",
-            "Свежий/травяной": "fresh"
-        }
-    },
-    {
-        "text": "Какой аромат больше привлекает?",
-        "options": {
-            "Цветочный": "floral",
-            "Фруктовый": "fruity",
-            "Травяной": "grassy",
-            "Древесный": "woody",
-            "Медовый": "honey"
-        }
-    }
+def get_main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Меню", callback_data="menu")],
+        [InlineKeyboardButton(text="Подобрать коктейль", callback_data="quiz_start")],
+        [InlineKeyboardButton(text="Карточка гостя", callback_data="guest_card")],
+        [InlineKeyboardButton(text="О нас", callback_data="about")],
+    ])
+
+
+def cocktail_text(c: dict) -> str:
+    return (
+        f"<b>{c['name']}</b>\n\n"
+        f"{c['description']}\n\n"
+        f"Состав: {c['ingredients']}\n"
+        f"Цена: {c['price']} руб."
+    )
+
+
+def get_cocktail_image(c: dict):
+    """Возвращает FSInputFile если файл изображения найден, иначе None."""
+    image_name = c.get("image", "")
+    if not image_name:
+        return None
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        path = os.path.join(PICTURES_DIR, image_name + ext)
+        if os.path.isfile(path):
+            return FSInputFile(path)
+    return None
+
+
+# ─── /start ───────────────────────────────────────────────────────────────────
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    await add_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or "",
+        message.from_user.last_name or "",
+    )
+    await message.answer(
+        "Добро пожаловать в <b>Ли Бо</b> — чайный бар и коктейли!\n\nВыберите раздел:",
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+# ─── MENU ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "menu")
+async def menu_categories(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Холодные безалкогольные", callback_data="cat_cold")],
+        [InlineKeyboardButton(text="Горячие безалкогольные", callback_data="cat_hot")],
+        [InlineKeyboardButton(text="Алкогольные", callback_data="cat_alcoholic")],
+        [InlineKeyboardButton(text="« Назад", callback_data="home")],
+    ])
+    await callback.message.edit_text(
+        "<b>Меню</b>\n\nВыберите категорию:",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cat_"))
+async def menu_category(callback: CallbackQuery, state: FSMContext):
+    category = callback.data.replace("cat_", "")
+    items = get_cocktails_by_category(category)
+    if not items:
+        await callback.answer("Категория пуста")
+        return
+    await state.update_data(menu_category=category, menu_index=0)
+    await show_menu_item(callback, state)
+
+
+async def show_menu_item(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    category = data["menu_category"]
+    index = data["menu_index"]
+    items = get_cocktails_by_category(category)
+    c = items[index]
+
+    nav_buttons = []
+    if index > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="menu_prev"))
+    nav_buttons.append(
+        InlineKeyboardButton(text=f"{index + 1}/{len(items)}", callback_data="menu_noop")
+    )
+    if index < len(items) - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="menu_next"))
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        nav_buttons,
+        [InlineKeyboardButton(text="« Назад к категориям", callback_data="menu")],
+    ])
+
+    text = f"<b>{get_category_name(category)}</b>\n\n{cocktail_text(c)}"
+    photo = get_cocktail_image(c)
+
+    # Delete old message and send new one (to support switching between photo/text)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    if photo:
+        await callback.message.answer_photo(photo=photo, caption=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu_prev")
+async def menu_prev(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    index = max(0, data.get("menu_index", 0) - 1)
+    await state.update_data(menu_index=index)
+    await show_menu_item(callback, state)
+
+
+@router.callback_query(F.data == "menu_next")
+async def menu_next(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    category = data.get("menu_category", "cold")
+    items = get_cocktails_by_category(category)
+    index = min(len(items) - 1, data.get("menu_index", 0) + 1)
+    await state.update_data(menu_index=index)
+    await show_menu_item(callback, state)
+
+
+@router.callback_query(F.data == "menu_noop")
+async def menu_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ─── ABOUT ────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "about")
+async def about(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text = (
+        "<b>Ли Бо | Чайный бар и коктейли</b>\n"
+        "Фридриха Энгельса, 13\n\n"
+        "Авторские коктейли на китайском чае — алкогольные и безалкогольные. "
+        "Азиатское крафтовое пиво, согревающие закуски. "
+        "Поэзия вкуса в самом центре, у парка «Орлёнок».\n\n"
+        "<b>Авторы бота:</b>\n"
+        "Разработчик — Руденко Вячеслав Александрович\n"
+        "Тестировщик — Баркалов Владимир Вячеславович\n\n"
+        "Наши соц. сети:"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ВКонтакте", url="https://vk.com/libotea")],
+        [InlineKeyboardButton(text="Telegram", url="https://t.me/libo_tea")],
+        [InlineKeyboardButton(text="Instagram", url="https://www.instagram.com/libo.tea/")],
+        [InlineKeyboardButton(text="« Назад", callback_data="home")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+# ─── HOME ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "home")
+async def home(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "Добро пожаловать в <b>Ли Бо</b> — чайный бар и коктейли!\n\nВыберите раздел:",
+        reply_markup=get_main_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ─── GUEST CARD ───────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "guest_card")
+async def guest_card(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    stats = await get_user_stats(callback.from_user.id)
+    text = (
+        f"<b>Карточка гостя</b>\n\n"
+        f"ID: <code>{callback.from_user.id}</code>\n"
+        f"Подборов коктейлей: {stats['quiz_count']}\n\n"
+    )
+    if stats["ratings"]:
+        text += "<b>Ваши оценки:</b>\n"
+        for r in stats["ratings"][:10]:
+            review_text = f" — {r['review']}" if r.get("review") else ""
+            text += f"• {r['cocktail_name']}: {r['rating']}{review_text}\n"
+    else:
+        text += "Вы пока не оценивали коктейли."
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="« Назад", callback_data="home")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+# ─── QUIZ ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "quiz_start")
+async def quiz_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(QuizStates.q_alcoholic)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Алкогольный", callback_data="qa_yes")],
+        [InlineKeyboardButton(text="Безалкогольный", callback_data="qa_no")],
+    ])
+    await callback.message.edit_text(
+        "<b>Подбор коктейля</b>\n\nВопрос 1/5:\nАлкогольный или безалкогольный?",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.q_alcoholic, F.data.startswith("qa_"))
+async def quiz_alcoholic(callback: CallbackQuery, state: FSMContext):
+    answer = callback.data.replace("qa_", "")
+    await state.update_data(alcoholic=answer)
+
+    if answer == "yes":
+        # Алкогольные — пропускаем вопрос о температуре
+        await state.update_data(temperature="any")
+        await state.set_state(QuizStates.q_taste)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Сладкий", callback_data="qt_sweet")],
+            [InlineKeyboardButton(text="Кисло-сладкий", callback_data="qt_sour_sweet")],
+            [InlineKeyboardButton(text="Кислый", callback_data="qt_sour")],
+        ])
+        await callback.message.edit_text(
+            "<b>Подбор коктейля</b>\n\nВопрос 2/5:\nКакой вкус предпочитаете?",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    else:
+        await state.set_state(QuizStates.q_temperature)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Холодный", callback_data="qtemp_cold")],
+            [InlineKeyboardButton(text="Горячий", callback_data="qtemp_hot")],
+            [InlineKeyboardButton(text="Без разницы", callback_data="qtemp_any")],
+        ])
+        await callback.message.edit_text(
+            "<b>Подбор коктейля</b>\n\nВопрос 2/5:\nХолодный или горячий?",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.q_temperature, F.data.startswith("qtemp_"))
+async def quiz_temperature(callback: CallbackQuery, state: FSMContext):
+    answer = callback.data.replace("qtemp_", "")
+    await state.update_data(temperature=answer)
+    await state.set_state(QuizStates.q_taste)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сладкий", callback_data="qt_sweet")],
+        [InlineKeyboardButton(text="Кисло-сладкий", callback_data="qt_sour_sweet")],
+        [InlineKeyboardButton(text="Кислый", callback_data="qt_sour")],
+    ])
+    await callback.message.edit_text(
+        "<b>Подбор коктейля</b>\n\nВопрос 3/5:\nКакой вкус предпочитаете?",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.q_taste, F.data.startswith("qt_"))
+async def quiz_taste(callback: CallbackQuery, state: FSMContext):
+    answer = callback.data.replace("qt_", "")
+    await state.update_data(taste=answer)
+    await state.set_state(QuizStates.q_tea)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Более чайный", callback_data="qtea_more")],
+        [InlineKeyboardButton(text="Менее чайный", callback_data="qtea_less")],
+    ])
+    await callback.message.edit_text(
+        "<b>Подбор коктейля</b>\n\nВопрос 4/5:\nБолее чайный или менее чайный?",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.q_tea, F.data.startswith("qtea_"))
+async def quiz_tea(callback: CallbackQuery, state: FSMContext):
+    answer = callback.data.replace("qtea_", "")
+    await state.update_data(tea_strength=answer)
+    await state.set_state(QuizStates.q_strength)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Крепкий", callback_data="qs_strong")],
+        [InlineKeyboardButton(text="Мягкий", callback_data="qs_soft")],
+    ])
+    await callback.message.edit_text(
+        "<b>Подбор коктейля</b>\n\nВопрос 5/5:\nКрепкий или мягкий?",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.q_strength, F.data.startswith("qs_"))
+async def quiz_strength(callback: CallbackQuery, state: FSMContext):
+    answer = callback.data.replace("qs_", "")
+    await state.update_data(strength=answer)
+    data = await state.get_data()
+
+    session_id = await add_quiz_session(callback.from_user.id, data)
+    results = match_cocktails(data)
+    await state.update_data(
+        quiz_results=results,
+        quiz_result_index=0,
+        quiz_session_id=session_id,
+    )
+    await state.set_state(QuizStates.browsing_results)
+    await show_quiz_result(callback, state)
+
+
+async def show_quiz_result(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    results = data.get("quiz_results", [])
+    index = data.get("quiz_result_index", 0)
+
+    if not results:
+        await callback.message.edit_text(
+            "К сожалению, не удалось подобрать коктейль. Попробуйте ещё раз!",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="« Назад", callback_data="home")],
+            ]),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    c = results[index]
+    nav_buttons = []
+    if index > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data="qr_prev"))
+    nav_buttons.append(
+        InlineKeyboardButton(text=f"{index + 1}/{len(results)}", callback_data="qr_noop")
+    )
+    if index < len(results) - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data="qr_next"))
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        nav_buttons,
+        [InlineKeyboardButton(text="Оценить коктейль", callback_data="rate_cocktail")],
+        [InlineKeyboardButton(text="« На главную", callback_data="home")],
+    ])
+
+    text = f"<b>Рекомендация</b>\n\n{cocktail_text(c)}"
+    photo = get_cocktail_image(c)
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    if photo:
+        await callback.message.answer_photo(photo=photo, caption=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+    await callback.answer()
+
+
+@router.callback_query(QuizStates.browsing_results, F.data == "qr_prev")
+async def qr_prev(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    index = max(0, data.get("quiz_result_index", 0) - 1)
+    await state.update_data(quiz_result_index=index)
+    await show_quiz_result(callback, state)
+
+
+@router.callback_query(QuizStates.browsing_results, F.data == "qr_next")
+async def qr_next(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    results = data.get("quiz_results", [])
+    index = min(len(results) - 1, data.get("quiz_result_index", 0) + 1)
+    await state.update_data(quiz_result_index=index)
+    await show_quiz_result(callback, state)
+
+
+@router.callback_query(QuizStates.browsing_results, F.data == "qr_noop")
+async def qr_noop(callback: CallbackQuery):
+    await callback.answer()
+
+
+# ─── RATING ───────────────────────────────────────────────────────────────────
+
+RATING_OPTIONS = [
+    "Отлично",
+    "Слишком крепкий",
+    "Слишком сладкий",
+    "Слишком кислый",
+    "Слишком чайный",
+    "Недостаточно сладкий",
+    "Недостаточно крепкий",
 ]
 
-# Хранилище ответов пользователей и состояний меню
-user_responses = {}
-user_states = {}
-user_menu_pages = {}  # Для хранения текущей страницы меню пользователя
 
-# Главное меню
-def main_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton("🍃 Пройти тест")
-    btn2 = types.KeyboardButton("📖 Посмотреть меню")
-    btn3 = types.KeyboardButton("🔄 Начать заново")
-    btn4 = types.KeyboardButton("ℹ️ О чаях")
-    markup.add(btn1, btn2, btn3, btn4)
-    return markup
-
-# Инлайн-кнопки для меню (по 1 чаю на страницу)
-def get_menu_keyboard(page=0):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    
-    # Получаем список чаев
-    tea_list = list(TEA_MENU.items())
-    total_pages = len(tea_list)
-    
-    # Кнопки навигации
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(types.InlineKeyboardButton("◀️ Назад", callback_data=f"menu_page_{page-1}"))
-    
-    nav_buttons.append(types.InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="current_page"))
-    
-    if page < total_pages - 1:
-        nav_buttons.append(types.InlineKeyboardButton("Вперед ▶️", callback_data=f"menu_page_{page+1}"))
-    
-    if nav_buttons:
-        markup.row(*nav_buttons)
-    
-    # Кнопки действий
-    markup.add(
-        types.InlineKeyboardButton("🏠 В главное меню", callback_data="to_main_menu"),
-        types.InlineKeyboardButton("🍃 Пройти тест", callback_data="start_test_from_menu")
+@router.callback_query(QuizStates.browsing_results, F.data == "rate_cocktail")
+async def rate_cocktail(callback: CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=opt, callback_data=f"rating_{i}")]
+        for i, opt in enumerate(RATING_OPTIONS)
+    ] + [[InlineKeyboardButton(text="« Назад", callback_data="back_to_results")]])
+    await callback.message.edit_text(
+        "<b>Оцените коктейль:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
     )
-    
-    return markup
+    await callback.answer()
 
-# Функция для отправки фото чая
-def send_tea_photo(chat_id, tea_name, tea_data, caption, reply_markup=None, message_id=None):
-    """Отправляет фото чая, если файл существует"""
-    photo_file = tea_data.get('photo_file')
-    
-    if photo_file:
-        photo_path = os.path.join(TEA_PHOTOS_DIR, photo_file)
-        
-        # Проверяем существование файла
-        if os.path.exists(photo_path):
-            try:
-                with open(photo_path, 'rb') as photo:
-                    if message_id and reply_markup:
-                        # Редактируем существующее сообщение с фото
-                        bot.edit_message_media(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            media=types.InputMediaPhoto(photo, caption=caption, parse_mode="Markdown"),
-                            reply_markup=reply_markup
-                        )
-                    elif reply_markup:
-                        # Отправляем новое фото с кнопками
-                        bot.send_photo(chat_id, photo, caption=caption, 
-                                     reply_markup=reply_markup, parse_mode="Markdown")
-                    else:
-                        # Отправляем фото без кнопок
-                        bot.send_photo(chat_id, photo, caption=caption, parse_mode="Markdown")
-                logger.debug(f"Фото отправлено: {photo_file}")
-                return True
-            except Exception as e:
-                logger.error(f"Ошибка при отправке фото {photo_file}: {e}")
-                # Если ошибка, отправляем текстовое сообщение
-                if message_id and reply_markup:
-                    try:
-                        bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=caption,
-                            reply_markup=reply_markup,
-                            parse_mode="Markdown"
-                        )
-                    except:
-                        bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                                       parse_mode="Markdown")
-                else:
-                    bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                                   parse_mode="Markdown")
-                return False
-        else:
-            logger.warning(f"Файл не найден: {photo_path}")
-            # Файл не найден, отправляем текстовое сообщение
-            if message_id and reply_markup:
-                try:
-                    bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=caption,
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
-                    )
-                except:
-                    bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                                   parse_mode="Markdown")
-            else:
-                bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                               parse_mode="Markdown")
-            return False
-    else:
-        # Нет фото, отправляем текстовое сообщение
-        if message_id and reply_markup:
-            try:
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=caption,
-                    reply_markup=reply_markup,
-                    parse_mode="Markdown"
-                )
-            except:
-                bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                               parse_mode="Markdown")
-        else:
-            bot.send_message(chat_id, caption, reply_markup=reply_markup, 
-                           parse_mode="Markdown")
-        return False
 
-# Команда /start
-@bot.message_handler(commands=['start'])
-def start_test(message):
-    user_id = message.chat.id
-    user_responses[user_id] = {}
-    user_states[user_id] = "main"
-    
-    welcome_text = (
-        "🍃 *Добро пожаловать в бота-чайного сомелье!*\n\n"
-        "Я помогу подобрать идеальный чайный напиток для вас!\n\n"
-        "Пройти тест из 5 вопросов - и я найду чай,\n"
-        "который идеально соответствует вашим предпочтениям.\n\n"
-        "Выберите действие:"
+@router.callback_query(QuizStates.browsing_results, F.data == "back_to_results")
+async def back_to_results(callback: CallbackQuery, state: FSMContext):
+    await show_quiz_result(callback, state)
+
+
+@router.callback_query(QuizStates.browsing_results, F.data.startswith("rating_"))
+async def save_rating(callback: CallbackQuery, state: FSMContext):
+    idx = int(callback.data.replace("rating_", ""))
+    rating = RATING_OPTIONS[idx]
+    data = await state.get_data()
+    results = data.get("quiz_results", [])
+    index = data.get("quiz_result_index", 0)
+    cocktail_name = results[index]["name"] if results else "Неизвестно"
+    session_id = data.get("quiz_session_id")
+
+    await state.update_data(pending_rating=rating, pending_cocktail=cocktail_name)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Написать отзыв", callback_data="write_review")],
+        [InlineKeyboardButton(text="Пропустить", callback_data="skip_review")],
+    ])
+    await callback.message.edit_text(
+        f"Оценка: <b>{rating}</b>\n\nХотите оставить отзыв?",
+        reply_markup=kb,
+        parse_mode="HTML",
     )
-    
-    bot.send_message(
-        user_id,
-        welcome_text,
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
-    )
-    logger.info(f"Пользователь {user_id} начал работу с ботом")
+    await callback.answer()
 
-# Обработка кнопок главного меню
-@bot.message_handler(func=lambda message: message.text in ["🍃 Пройти тест", "📖 Посмотреть меню", "🔄 Начать заново", "ℹ️ О чаях"])
-def handle_main_menu(message):
-    user_id = message.chat.id
-    
-    if message.text == "🍃 Пройти тест":
-        user_responses[user_id] = {}
-        user_states[user_id] = "test"
-        logger.info(f"Пользователь {user_id} начал тест")
-        ask_question(message, 0)
-        
-    elif message.text == "📖 Посмотреть меню":
-        logger.info(f"Пользователь {user_id} запросил меню")
-        show_menu_page(message, page=0)
-        
-    elif message.text == "🔄 Начать заново":
-        logger.info(f"Пользователь {user_id} начал заново")
-        start_test(message)
-        
-    elif message.text == "ℹ️ О чаях":
-        show_tea_info(message)
 
-# Показать страницу меню с фото чая
-def show_menu_page(message, page=0):
-    user_id = message.chat.id
-    user_states[user_id] = "browsing_menu"
-    user_menu_pages[user_id] = page
-    
-    tea_list = list(TEA_MENU.items())
-    total_pages = len(tea_list)
-    
-    if page >= total_pages:
-        page = 0
-    
-    # Получаем текущий чай
-    tea_name, tea_data = tea_list[page]
-    
-    # Формируем описание
-    caption = (
-        f"📖 *Чайная карта* (страница {page+1}/{total_pages})\n\n"
-        f"*{tea_name}*\n"
-        f"Цена: {tea_data['price']}₽\n\n"
-        f"{tea_data['description']}\n\n"
-        f"Используйте кнопки для навигации по меню"
+@router.callback_query(QuizStates.browsing_results, F.data == "write_review")
+async def write_review_prompt(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(QuizStates.waiting_review)
+    await callback.message.edit_text(
+        "Напишите ваш отзыв текстовым сообщением:",
+        parse_mode="HTML",
     )
-    
-    # Отправляем фото с кнопками
-    send_tea_photo(
-        user_id, 
-        tea_name, 
-        tea_data, 
-        caption, 
-        get_menu_keyboard(page)
+    await callback.answer()
+
+
+@router.message(QuizStates.waiting_review)
+async def save_review(message: Message, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("pending_rating", "")
+    cocktail_name = data.get("pending_cocktail", "")
+    session_id = data.get("quiz_session_id")
+    review = message.text
+
+    await add_cocktail_rating(message.from_user.id, cocktail_name, rating, review, session_id)
+    await state.set_state(QuizStates.browsing_results)
+    await message.answer(
+        f"Спасибо за отзыв о <b>{cocktail_name}</b>!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="« На главную", callback_data="home")],
+        ]),
+        parse_mode="HTML",
     )
 
-# Показать информацию о типах чая
-def show_tea_info(message):
-    info_text = (
-        "*Информация о типах чая:*\n\n"
-        "*Зеленый чай* - минимальная обработка, сохраняет натуральный цвет и свежесть\n"
-        "*Черный чай* - полная ферментация, насыщенный цвет и крепкий вкус\n"
-        "*Улун* - частичная ферментация, сочетает свежесть зеленого и насыщенность черного\n"
-        "*Белый чай* - самые нежные почки, минимальная обработка\n"
-        "*Пуэр* - ферментированный чай, выдержанный годами\n"
-        "*Травяные чаи* - настои трав, цветов, плодов (не содержат чайных листьев)\n\n"
-        "Рекомендую пройти тест для точного подбора!"
+
+@router.callback_query(QuizStates.browsing_results, F.data == "skip_review")
+async def skip_review(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    rating = data.get("pending_rating", "")
+    cocktail_name = data.get("pending_cocktail", "")
+    session_id = data.get("quiz_session_id")
+
+    await add_cocktail_rating(callback.from_user.id, cocktail_name, rating, None, session_id)
+    await callback.message.edit_text(
+        f"Оценка сохранена для <b>{cocktail_name}</b>!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="« На главную", callback_data="home")],
+        ]),
+        parse_mode="HTML",
     )
-    
-    bot.send_message(
-        message.chat.id,
-        info_text,
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
-    )
+    await callback.answer()
 
-# Вспомогательные функции для преобразования значений
-def get_tea_type_name(type_code):
-    types = {
-        "green": "Зеленый",
-        "black": "Черный",
-        "oolong": "Улун",
-        "white": "Белый",
-        "pu-erh": "Пуэр",
-        "herbal": "Травяной",
-        "scented": "Ароматизированный"
-    }
-    return types.get(type_code, type_code)
 
-def get_strength_name(strength):
-    strengths = {
-        "very_light": "Очень легкая",
-        "light": "Легкая",
-        "medium": "Средняя",
-        "strong": "Крепкая",
-        "very_strong": "Очень крепкая"
-    }
-    return strengths.get(strength, strength)
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-def get_caffeine_name(caffeine):
-    caffeine_levels = {
-        "high": "Высокое",
-        "medium": "Среднее",
-        "low": "Низкое",
-        "none": "Отсутствует"
-    }
-    return caffeine_levels.get(caffeine, caffeine)
+async def main():
+    await init_db()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+    logger.info("Бот запущен")
+    await dp.start_polling(bot)
 
-def get_taste_name(taste):
-    tastes = {
-        "fresh": "Свежий",
-        "floral": "Цветочный",
-        "fruity": "Фруктовый",
-        "herbal": "Травяной",
-        "earthy": "Землистый",
-        "muscatel": "Мускатный",
-        "delicate": "Нежный",
-        "sweet": "Сладковатый"
-    }
-    return tastes.get(taste, taste)
 
-def get_aroma_name(aroma):
-    aromas = {
-        "grassy": "Травяной",
-        "orchid": "Орхидея",
-        "fruity": "Фруктовый",
-        "honey": "Медовый",
-        "woody": "Древесный",
-        "jasmine": "Жасмин",
-        "meadow": "Луговой",
-        "nutty": "Ореховый"
-    }
-    return aromas.get(aroma, aroma)
-
-# Обработка инлайн-кнопок
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback_query(call):
-    user_id = call.message.chat.id
-    
-    if call.data.startswith("menu_page_"):
-        # Листание страниц меню
-        page = int(call.data.split("_")[2])
-        user_menu_pages[user_id] = page
-        
-        tea_list = list(TEA_MENU.items())
-        total_pages = len(tea_list)
-        
-        if page < 0 or page >= total_pages:
-            return
-        
-        # Получаем текущий чай
-        tea_name, tea_data = tea_list[page]
-        
-        # Формируем описание
-        caption = (
-            f"📖 *Чайная карта* (страница {page+1}/{total_pages})\n\n"
-            f"*{tea_name}*\n"
-            f"Цена: {tea_data['price']}₽\n\n"
-            f"{tea_data['description']}\n\n"
-            f"Используйте кнопки для навигации по меню"
-        )
-        
-        # Обновляем фото и кнопки
-        send_tea_photo(
-            user_id,
-            tea_name,
-            tea_data,
-            caption,
-            get_menu_keyboard(page),
-            call.message.message_id
-        )
-        
-    elif call.data == "to_main_menu":
-        # Возврат в главное меню из меню чаев
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        # Показываем главное меню
-        bot.send_message(
-            user_id,
-            "🍃 *Главное меню*\n\nВыберите действие:",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
-        )
-        
-    elif call.data == "start_test_from_menu":
-        # Начать тест из меню чаев
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        user_responses[user_id] = {}
-        user_states[user_id] = "test"
-        ask_question(call.message, 0)
-        
-    elif call.data == "start_test_from_result":
-        # Начать тест из результатов
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        user_responses[user_id] = {}
-        user_states[user_id] = "test"
-        ask_question(call.message, 0)
-        
-    elif call.data == "show_menu_from_result":
-        # Показать меню из результатов
-        try:
-            bot.delete_message(user_id, call.message.message_id)
-        except:
-            pass
-        
-        show_menu_page(call.message, page=0)
-
-# Начать тест с первого вопроса
-def ask_question(message, question_index):
-    user_id = message.chat.id
-    
-    if question_index < len(QUESTIONS):
-        question = QUESTIONS[question_index]
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        
-        buttons = []
-        for option_text in question["options"].keys():
-            buttons.append(types.KeyboardButton(option_text))
-        
-        # Распределяем кнопки по 2 в ряд
-        for i in range(0, len(buttons), 2):
-            if i + 1 < len(buttons):
-                markup.add(buttons[i], buttons[i + 1])
-            else:
-                markup.add(buttons[i])
-        
-        # Добавляем кнопку отмены
-        cancel_btn = types.KeyboardButton("🔙 Отмена")
-        markup.add(cancel_btn)
-        
-        bot.send_message(
-            user_id,
-            f"*Вопрос {question_index + 1}/{len(QUESTIONS)}:*\n{question['text']}",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        
-        # Сохраняем текущий вопрос
-        user_states[user_id] = f"question_{question_index}"
-        logger.debug(f"Пользователь {user_id} получил вопрос {question_index + 1}")
-    else:
-        show_result(message)
-
-# Обработка ответов на вопросы теста
-@bot.message_handler(func=lambda message: user_states.get(message.chat.id, "").startswith("question_"))
-def handle_test_answer(message):
-    user_id = message.chat.id
-    
-    if message.text == "🔙 Отмена":
-        bot.send_message(user_id, "Тест отменен.", reply_markup=main_menu())
-        user_states[user_id] = "main"
-        logger.info(f"Пользователь {user_id} отменил тест")
-        return
-    
-    # Получаем номер текущего вопроса
-    current_state = user_states[user_id]
-    question_index = int(current_state.split("_")[1])
-    
-    if question_index >= len(QUESTIONS):
-        return
-    
-    question = QUESTIONS[question_index]
-    user_answer = message.text
-    
-    # Проверяем, что ответ валидный
-    if user_answer in question["options"]:
-        user_responses[user_id][f"q{question_index}"] = question["options"][user_answer]
-        logger.debug(f"Пользователь {user_id}: вопрос {question_index + 1}, ответ: {user_answer}")
-        
-        # Переходим к следующему вопросу
-        next_question = question_index + 1
-        ask_question(message, next_question)
-    else:
-        # Неверный ответ - повторяем вопрос
-        bot.send_message(
-            user_id,
-            "Пожалуйста, выберите вариант из предложенных кнопок.",
-            parse_mode="Markdown"
-        )
-        ask_question(message, question_index)
-
-# Функция подбора чая (только один лучший)
-def find_best_tea(user_prefs):
-    best_tea = None
-    best_score = 0
-    
-    for tea_name, tea_data in TEA_MENU.items():
-        score = 0
-        chars = tea_data["characteristics"]
-        
-        # Сравниваем каждый критерий
-        for i in range(len(QUESTIONS)):
-            q_key = f"q{i}"
-            if q_key in user_prefs:
-                user_val = user_prefs[q_key]
-                tea_val = chars[list(chars.keys())[i]]
-                
-                if user_val == tea_val:
-                    score += 3  # Полное совпадение
-                elif i == 0 and user_val in ["green", "black", "oolong", "white"] and tea_val in ["green", "black", "oolong", "white"]:
-                    score += 1  # Оба настоящие чаи
-                elif i == 2:  # Кофеин
-                    if user_val == "high" and tea_val == "high":
-                        score += 2
-                    elif user_val == "none" and tea_val == "none":
-                        score += 2
-                    elif user_val in ["medium", "low"] and tea_val in ["medium", "low"]:
-                        score += 1
-        
-        # Если нашли чай с лучшим счетом
-        if score > best_score:
-            best_score = score
-            best_tea = (tea_name, tea_data, score)
-    
-    return best_tea
-
-# Показать результат с фото (только один лучший чай)
-def show_result(message):
-    user_id = message.chat.id
-    
-    if user_id not in user_responses or len(user_responses[user_id]) < len(QUESTIONS):
-        bot.send_message(
-            user_id, 
-            "Давайте пройдем тест сначала.", 
-            reply_markup=main_menu()
-        )
-        return
-    
-    # Находим лучший чай
-    best_tea = find_best_tea(user_responses[user_id])
-    
-    if not best_tea:
-        bot.send_message(
-            user_id,
-            "😔 К сожалению, не нашлось идеального чая по вашим предпочтениям.\nПопробуйте изменить критерии или посмотрите полное меню.",
-            reply_markup=main_menu()
-        )
-        return
-    
-    tea_name, tea_data, score = best_tea
-    
-    # Формируем текст результата
-    result_text = (
-        f"🎉 *Ваш идеальный чай подобран!*\n\n"
-        f"По вашим предпочтениям я рекомендую:\n\n"
-        f"*{tea_name}* - {tea_data['price']}₽\n"
-        f"Совпадение: {score}/15 баллов\n\n"
-        f"{tea_data['description']}\n\n"
-        f"Что вы хотите сделать дальше?"
-    )
-    
-    # Создаем кнопки для результата
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("📖 Посмотреть меню", callback_data="show_menu_from_result"),
-        types.InlineKeyboardButton("🍃 Пройти тест заново", callback_data="start_test_from_result"),
-        types.InlineKeyboardButton("🏠 В главное меню", callback_data="to_main_menu")
-    )
-    
-    # Отправляем результат с фото
-    send_tea_photo(user_id, tea_name, tea_data, result_text, markup)
-    
-    user_states[user_id] = "result"
-    logger.info(f"Пользователь {user_id} получил рекомендацию: {tea_name} (счет: {score}/15)")
-    
-    # Очищаем ответы пользователя для следующего теста
-    user_responses[user_id] = {}
-
-# Обработка команды /test
-@bot.message_handler(commands=['test'])
-def start_test_command(message):
-    user_id = message.chat.id
-    user_responses[user_id] = {}
-    user_states[user_id] = "test"
-    logger.info(f"Пользователь {user_id} начал тест через команду")
-    ask_question(message, 0)
-
-# Обработка команды /help
-@bot.message_handler(commands=['help'])
-def show_help(message):
-    help_text = (
-        "*🍃 Чайный сомелье - доступные команды:*\n\n"
-        "/start - Главное меню\n"
-        "/test - Начать тест по подбору чая\n"
-        "/menu - Показать чайную карту\n"
-        "/help - Эта справка\n\n"
-        "*Или используйте кнопки меню:*\n"
-        "🍃 Пройти тест - подбор чая по предпочтениям\n"
-        "📖 Посмотреть меню - вся чайная карта (листается кнопками)\n"
-        "ℹ️ О чаях - информация о типах чая\n"
-        "🔄 Начать заново - сбросить всё"
-    )
-    
-    bot.send_message(
-        message.chat.id,
-        help_text,
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
-    )
-    logger.info(f"Пользователь {message.chat.id} запросил справку")
-
-# Обработка команды /menu
-@bot.message_handler(commands=['menu'])
-def command_menu(message):
-    show_menu_page(message, page=0)
-
-# Проверить существование всех файлов фотографий
-def check_photo_files():
-    missing_files = []
-    available_files = []
-    
-    for tea_name, tea_data in TEA_MENU.items():
-        photo_file = tea_data.get('photo_file')
-        if photo_file:
-            photo_path = os.path.join(TEA_PHOTOS_DIR, photo_file)
-            if os.path.exists(photo_path):
-                available_files.append(photo_file)
-            else:
-                missing_files.append((tea_name, photo_file))
-    
-    return available_files, missing_files
-
-# Обработка любых других сообщений (fallback)
-@bot.message_handler(func=lambda message: True)
-def handle_other_messages(message):
-    user_id = message.chat.id
-    
-    # Если это команда, игнорируем (она обрабатывается выше)
-    if message.text and message.text.startswith('/'):
-        return
-    
-    # Если пользователь не в состоянии или в главном меню
-    if user_id not in user_states or user_states[user_id] == "main":
-        bot.send_message(
-            user_id,
-            "🍃 *Чайный сомелье приветствует вас!*\n\n"
-            "Пожалуйста, выберите действие из меню ниже:",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
-        )
-    else:
-        # Если пользователь в процессе теста или другого состояния
-        bot.send_message(
-            user_id,
-            "Пожалуйста, используйте кнопки для выбора вариантов или нажмите /start для возврата в главное меню.",
-            parse_mode="Markdown"
-        )
-
-# Запуск бота
 if __name__ == "__main__":
-    # Проверяем фото файлы при запуске
-    available_files, missing_files = check_photo_files()
-    
-    if available_files:
-        logger.info(f"✅ Найдено {len(available_files)} фото: {', '.join(available_files)}")
-    else:
-        logger.warning("⚠️ Фотографии чаев не найдены. Бот будет работать без фото.")
-    
-    if missing_files:
-        logger.warning("⚠️ Отсутствующие фото:")
-        for tea_name, photo_file in missing_files:
-            logger.warning(f"  - {tea_name}: {photo_file}")
-    
-    # Проверяем подключение к боту
-    try:
-        bot_info = bot.get_me()
-        logger.info(f"✅ Бот успешно запущен: @{bot_info.username}")
-        logger.info(f"🍃 Имя бота: {bot_info.first_name}")
-        logger.info(f"🆔 ID бота: {bot_info.id}")
-        logger.info("🍵 Чайный сомелье готов к работе!")
-        logger.info("=" * 50)
-        
-        # Запускаем опрос
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при запуске бота: {e}")
-        logger.error("Проверьте ваш токен TELEGRAM_BOT_TOKEN")
-        exit(1)
+    asyncio.run(main())
